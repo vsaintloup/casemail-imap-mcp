@@ -1,3 +1,34 @@
+.env
+.env.*
+tmp/
+temp/
+cache/
+downloads/
+*.log
+
+# Environment variables
+.env
+.env.*
+
+# IMAP / email temp data
+tmp/
+temp/
+cache/
+downloads/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.pid
+
+# VSCode (optionnel)
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
