@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "casemail-imap-mcp"
+version = "0.1.0"
+description = "Read-only local MCP server for case-scoped IMAP review."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+  { name = "OpenAI Codex" }
+]
+dependencies = [
+  "beautifulsoup4==4.14.2",
+  "cryptography==46.0.3",
+  "mcp==1.27.0",
+  "openpyxl==3.1.5",
+  "pillow==11.3.0",
+  "pydantic==2.12.3",
+  "pydantic-settings==2.11.0",
+  "pypdf==6.1.3",
+  "python-docx==1.2.0",
+  "python-pptx==1.0.2",
+  "pytesseract==0.3.13",
+  "uvicorn==0.37.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "pytest==8.4.2",
+  "pytest-asyncio==1.2.0",
+  "testcontainers==4.13.2"
+]
+
+[project.scripts]
+casemail-imap-mcp = "casemail_imap_mcp.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/casemail_imap_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: tests that require Docker/GreenMail"
+]
+
