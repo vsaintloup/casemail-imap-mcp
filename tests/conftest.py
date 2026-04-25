@@ -24,6 +24,7 @@ from casemail_imap_mcp.config import Settings  # noqa: E402
 def settings(tmp_path: Path) -> Settings:
     cache_dir = tmp_path / "cache"
     return Settings(
+        _env_file=None,
         imap_host="imap.test.local",
         imap_port=993,
         imap_username="lawyer@example.com",
@@ -96,4 +97,3 @@ def sample_pptx_bytes() -> bytes:
     buffer = BytesIO()
     presentation.save(buffer)
     return buffer.getvalue()
-

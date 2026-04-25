@@ -7,8 +7,9 @@ from typing import Callable
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
+from starlette.concurrency import run_in_threadpool
 
-from .cache import PlainSyncStore
+from .cache import PlainSyncStore, utc_now_iso
 from .config import Settings
 from .imap_client import ReadOnlyImapClient
 from .security import FolderAccessController
@@ -102,6 +103,7 @@ def admin_routes(settings: Settings, reload_settings: SettingsReloader) -> list[
                         "uidvalidity": folder.uidvalidity,
                         "selected": folder.name in selected,
                         "is_sent_candidate": access.is_sent_folder_allowed(folder.name),
+                        "is_selectable": not any(flag.lower() == r"\noselect" for flag in folder.flags),
                     }
                 )
             return JSONResponse({"folders": response_folders})
@@ -123,8 +125,23 @@ def admin_routes(settings: Settings, reload_settings: SettingsReloader) -> list[
         if not current.imap_host or not current.imap_username or not current.imap_password:
             return JSONResponse({"error": "IMAP credentials are incomplete."}, status_code=400)
         store = PlainSyncStore(current)
-        result = SyncService(current, store).sync_selected_folders()
-        return JSONResponse(result)
+        try:
+            payload = await request.json()
+            since_months = _parse_optional_positive_int(payload.get("since_months"), field_name="since_months")
+            result = await run_in_threadpool(SyncService(current, store).sync_selected_folders, since_months)
+            return JSONResponse(result)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception as exc:
+            # Always return JSON from admin APIs so the local UI can display a
+            # safe diagnostic instead of exposing a framework 500 page.
+            status = {
+                "state": "failed",
+                "updated_at": utc_now_iso(),
+                "errors": [str(exc)],
+            }
+            store.set_sync_status(status)
+            return JSONResponse({"error": str(exc), "sync_status": status}, status_code=500)
 
     async def sync_status(request: Request) -> JSONResponse:
         current = Settings()
@@ -207,6 +224,18 @@ def _bool_to_env(value: object) -> str:
     return "true" if bool(value) else "false"
 
 
+def _parse_optional_positive_int(value: object, *, field_name: str) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return parsed
+
+
 ADMIN_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -281,6 +310,30 @@ ADMIN_HTML = """<!doctype html>
     .folder-name { font-weight: 650; word-break: break-word; }
     .folder-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
     .badge { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
+    .sync-options { display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 14px; align-items: end; margin-top: 14px; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .progress {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfcfd;
+    }
+    .progress-track {
+      height: 12px;
+      border-radius: 999px;
+      background: #dfe7ee;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-bar {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), #1d9a8f);
+      transition: width 180ms ease;
+    }
+    .progress-text { color: var(--muted); font-size: 13px; }
     pre {
       white-space: pre-wrap;
       word-break: break-word;
@@ -348,6 +401,18 @@ ADMIN_HTML = """<!doctype html>
           <button class="ghost" id="saveFolders">Save selection</button>
           <button id="syncNow">Sync messages and attachments</button>
         </div>
+        <div class="sync-options">
+          <div>
+            <label for="syncMonths">Limit sync to last N months</label>
+            <input id="syncMonths" type="number" min="1" step="1" placeholder="Blank = all messages">
+            <div class="hint">Example: 6 downloads only messages dated in roughly the last 6 months.</div>
+          </div>
+          <div class="progress" aria-live="polite">
+            <div class="progress-text" id="progressText">Idle</div>
+            <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+            <div class="progress-text" id="progressDetail">No sync running.</div>
+          </div>
+        </div>
         <label for="folderFilter">Filter</label>
         <input id="folderFilter" placeholder="Type to filter folders">
         <div class="folders" id="folders"></div>
@@ -361,13 +426,20 @@ ADMIN_HTML = """<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
     let folders = [];
+    let progressTimer = null;
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
         headers: { "content-type": "application/json" },
         ...options,
       });
-      const data = await response.json();
+      const text = await response.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (error) {
+        data = { error: text || response.statusText || "Unexpected non-JSON response" };
+      }
       if (!response.ok) throw new Error(data.error || JSON.stringify(data));
       return data;
     }
@@ -376,23 +448,66 @@ ADMIN_HTML = """<!doctype html>
       button.disabled = busy;
     }
 
+    function renderStatus(status) {
+      $("syncStatus").textContent = JSON.stringify(status, null, 2);
+      const state = status.state || "idle";
+      const current = status.current || {};
+      let percent = 0;
+      let headline = state;
+      let detail = "No sync running.";
+      if (state === "completed" || state === "completed_with_errors") {
+        percent = 100;
+        detail = `${status.folders?.length || 0} folder(s) processed; ${status.errors?.length || 0} error(s).`;
+      } else if (state === "running" && current) {
+        percent = Number(current.progress_percent || 0);
+        headline = `Syncing folder ${current.folder_index || "?"}/${current.total_folders || "?"}`;
+        detail = `${current.messages_processed || 0}/${current.messages_to_download || 0} new message(s), ${current.attachments_downloaded || 0} attachment(s), ${current.attachments_skipped || 0} skipped.`;
+      } else if (state === "failed") {
+        detail = (status.errors || []).join("; ") || "Sync failed.";
+      }
+      $("progressBar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
+      $("progressText").textContent = headline;
+      $("progressDetail").textContent = detail;
+    }
+
+    function startProgressPolling() {
+      stopProgressPolling();
+      progressTimer = window.setInterval(async () => {
+        try {
+          renderStatus(await api("/admin/api/sync-status"));
+        } catch (error) {
+          $("progressDetail").textContent = error.message;
+        }
+      }, 1000);
+    }
+
+    function stopProgressPolling() {
+      if (progressTimer) {
+        window.clearInterval(progressTimer);
+        progressTimer = null;
+      }
+    }
+
     function renderFolders() {
       const filter = $("folderFilter").value.toLowerCase();
       const root = $("folders");
       root.innerHTML = "";
       for (const folder of folders.filter((item) => item.name.toLowerCase().includes(filter))) {
+        const selectable = folder.is_selectable !== false;
         const row = document.createElement("label");
         row.className = "folder";
         row.innerHTML = `
-          <input type="checkbox" data-folder="${folder.name.replaceAll('"', '&quot;')}" ${folder.selected ? "checked" : ""}>
+          <input type="checkbox" data-folder="${folder.name.replaceAll('"', '&quot;')}" ${folder.selected && selectable ? "checked" : ""} ${selectable ? "" : "disabled"}>
           <div>
             <div class="folder-name"></div>
             <div class="folder-meta"></div>
           </div>
-          <span class="badge">${folder.is_sent_candidate ? "sent" : "mail"}</span>
+          <span class="badge">${!selectable ? "group" : (folder.is_sent_candidate ? "sent" : "mail")}</span>
         `;
         row.querySelector(".folder-name").textContent = folder.name;
-        row.querySelector(".folder-meta").textContent = `${folder.message_count ?? "?"} messages`;
+        row.querySelector(".folder-meta").textContent = selectable
+          ? `${folder.message_count ?? "?"} messages`
+          : "Not selectable by IMAP";
         root.appendChild(row);
       }
     }
@@ -407,7 +522,7 @@ ADMIN_HTML = """<!doctype html>
       $("sentRegex").value = config.sent_folder_allowlist_regex || "^(Sent|Sent Items)$";
       $("defaultSent").value = config.default_sent_folders || "Sent,Sent Items";
       $("topStatus").textContent = config.imap_password_configured ? "Password configured" : "Password not configured";
-      $("syncStatus").textContent = JSON.stringify(config.sync_status, null, 2);
+      renderStatus(config.sync_status);
     }
 
     async function loadFolders() {
@@ -417,7 +532,7 @@ ADMIN_HTML = """<!doctype html>
 
     $("folderFilter").addEventListener("input", renderFolders);
     $("refreshStatus").addEventListener("click", async () => {
-      $("syncStatus").textContent = JSON.stringify(await api("/admin/api/sync-status"), null, 2);
+      renderStatus(await api("/admin/api/sync-status"));
     });
     $("saveConfig").addEventListener("click", async (event) => {
       setBusy(event.target, true);
@@ -434,7 +549,7 @@ ADMIN_HTML = """<!doctype html>
         };
         const config = await api("/admin/api/config", { method: "POST", body: JSON.stringify(payload) });
         $("imapPassword").value = "";
-        $("syncStatus").textContent = JSON.stringify(config.sync_status, null, 2);
+        renderStatus(config.sync_status);
         $("topStatus").textContent = "Config saved";
       } catch (error) {
         $("topStatus").textContent = error.message;
@@ -470,12 +585,19 @@ ADMIN_HTML = """<!doctype html>
         if (selected.length) {
           await api("/admin/api/selected-folders", { method: "POST", body: JSON.stringify({ folders: selected }) });
         }
-        const result = await api("/admin/api/sync", { method: "POST", body: "{}" });
-        $("syncStatus").textContent = JSON.stringify(result, null, 2);
+        const monthText = $("syncMonths").value.trim();
+        const payload = {};
+        if (monthText) payload.since_months = Number(monthText);
+        $("topStatus").textContent = "Sync running";
+        renderStatus({ state: "running", current: { progress_percent: 0, messages_processed: 0, messages_to_download: 0 } });
+        startProgressPolling();
+        const result = await api("/admin/api/sync", { method: "POST", body: JSON.stringify(payload) });
+        renderStatus(result);
         $("topStatus").textContent = result.state;
       } catch (error) {
         $("topStatus").textContent = error.message;
       } finally {
+        stopProgressPolling();
         setBusy(event.target, false);
       }
     });
@@ -483,4 +605,3 @@ ADMIN_HTML = """<!doctype html>
   </script>
 </body>
 </html>"""
-

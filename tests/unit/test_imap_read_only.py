@@ -20,13 +20,21 @@ class FakeImap:
 
     def list(self) -> tuple[str, list[bytes]]:
         self.calls.append(("list", ()))
-        return "OK", [b'(\\HasNoChildren) "/" "Client/ABC"']
+        return "OK", [
+            b'(\\HasNoChildren) "/" "Client/ABC"',
+            b'(\\HasNoChildren) "/" "Client/Folder With Spaces"',
+        ]
 
     def status(self, folder: str, items: str) -> tuple[str, list[bytes]]:
         self.calls.append(("status", (folder, items)))
+        if "Folder With Spaces" in folder:
+            return "BAD", [b"Invalid arguments"]
         return "OK", [b'"Client/ABC" (MESSAGES 2 UIDVALIDITY 12345)']
 
-    def examine(self, folder: str) -> tuple[str, list[bytes]]:
+    def select(self, folder: str, readonly: bool = False) -> tuple[str, list[bytes]]:
+        self.calls.append(("select", (folder, readonly)))
+        if not readonly:
+            raise AssertionError("CaseMail must only open folders read-only")
         self.calls.append(("examine", (folder,)))
         return "OK", [b"2"]
 
@@ -52,7 +60,7 @@ def test_read_only_client_uses_examine_and_body_peek(monkeypatch, settings) -> N
     monkeypatch.setattr("imaplib.IMAP4_SSL", lambda host, port: fake)
 
     with ReadOnlyImapClient(settings) as client:
-        client.list_folders(include_counts=True)
+        folders = client.list_folders(include_counts=True)
         uidvalidity, uids = client.search_uids("Client/ABC")
         fetched = client.fetch_message("Client/ABC", uids[-1], uidvalidity)
 
@@ -60,10 +68,13 @@ def test_read_only_client_uses_examine_and_body_peek(monkeypatch, settings) -> N
     uid_commands = [args for name, args in fake.calls if name == "uid"]
 
     assert "examine" in commands
+    assert [folder.name for folder in folders] == ["Client/ABC", "Client/Folder With Spaces"]
+    assert folders[0].message_count == 2
+    assert folders[1].message_count is None
     assert uidvalidity == 12345
     assert fetched.raw_bytes == b"Hello world!"
     assert any(command[0] == "FETCH" and "BODY.PEEK[]" in command[2] for command in uid_commands)
     assert "store" not in commands
     assert "copy" not in commands
     assert "append" not in commands
-
+    assert all(args[1] is True for name, args in fake.calls if name == "select")

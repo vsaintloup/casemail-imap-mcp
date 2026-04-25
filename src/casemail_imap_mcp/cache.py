@@ -442,7 +442,9 @@ class PlainSyncStore:
                 (self.account,),
             ).fetchall()
         status = json.loads(row["value_json"]) if row else {"state": "idle", "updated_at": None}
-        status["folders"] = [dict(folder_row) for folder_row in folders]
+        cached_folders = [dict(folder_row) for folder_row in folders]
+        status.setdefault("folders", cached_folders)
+        status["cached_folders"] = cached_folders
         return status
 
     def _put_state(self, connection: sqlite3.Connection, key: str, value: dict[str, object]) -> None:

@@ -119,8 +119,8 @@ class FakeSyncClient:
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
-    def search_uids(self, folder: str):
-        self.calls.append(("search_uids", (folder,)))
+    def search_uids(self, folder: str, since=None):
+        self.calls.append(("search_uids", (folder, since)))
         return 777, [1, 2]
 
     def fetch_message(self, folder: str, uid: int, uidvalidity: int):
@@ -177,3 +177,32 @@ def test_sync_skips_oversized_attachment_bytes(monkeypatch, settings) -> None:
     assert attachment["raw_bytes_cached"] is False
     assert attachment["skipped_reason"]
 
+
+class FailingFolderClient(FakeSyncClient):
+    def search_uids(self, folder: str, since=None):
+        raise RuntimeError("folder is not selectable")
+
+
+def test_sync_reports_folder_errors_without_500(monkeypatch, settings) -> None:
+    store = PlainSyncStore(settings)
+    store.set_selected_folders(["Client/ABC"])
+    monkeypatch.setattr("casemail_imap_mcp.sync_service.ReadOnlyImapClient", FailingFolderClient)
+
+    result = SyncService(settings, store).sync_selected_folders()
+
+    assert result["state"] == "completed_with_errors"
+    assert "folder is not selectable" in result["errors"][0]
+
+
+def test_sync_month_limit_passes_since_to_imap(monkeypatch, settings) -> None:
+    store = PlainSyncStore(settings)
+    store.set_selected_folders(["Client/ABC"])
+    FakeSyncClient.calls = []
+    monkeypatch.setattr("casemail_imap_mcp.sync_service.ReadOnlyImapClient", FakeSyncClient)
+
+    result = SyncService(settings, store).sync_selected_folders(since_months=6)
+
+    search_calls = [call for call in FakeSyncClient.calls if call[0] == "search_uids"]
+    assert result["since_months"] == 6
+    assert search_calls[0][1][1] is not None
+    assert search_calls[0][1][1].tzinfo is not None

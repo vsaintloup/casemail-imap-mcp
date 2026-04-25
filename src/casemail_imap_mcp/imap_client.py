@@ -79,10 +79,13 @@ class ReadOnlyImapClient(AbstractContextManager["ReadOnlyImapClient"]):
             flags, delimiter, name = parse_imap_list_line(line)
             message_count = None
             uidvalidity = None
-            if include_counts:
-                status_data = self.get_folder_status(name)
-                message_count = status_data.get("MESSAGES")
-                uidvalidity = status_data.get("UIDVALIDITY")
+            if include_counts and not any(flag.lower() == r"\noselect" for flag in flags):
+                try:
+                    status_data = self.get_folder_status(name)
+                    message_count = status_data.get("MESSAGES")
+                    uidvalidity = status_data.get("UIDVALIDITY")
+                except ImapError as exc:
+                    logger.debug("Skipping folder STATUS for %s: %s", name, exc)
             folders.append(
                 ImapFolder(
                     name=name,
@@ -96,7 +99,7 @@ class ReadOnlyImapClient(AbstractContextManager["ReadOnlyImapClient"]):
 
     def get_folder_status(self, folder: str) -> dict[str, int]:
         encoded_folder = encode_imap_utf7(folder)
-        status, data = self.raw.status(encoded_folder, "(MESSAGES UIDVALIDITY)")
+        status, data = self.raw.status(_quote_mailbox(encoded_folder), "(MESSAGES UIDVALIDITY)")
         self._ensure_ok(status, "STATUS")
         line = (data or [b""])[0]
         text = line.decode("utf-8", "replace")
@@ -149,7 +152,9 @@ class ReadOnlyImapClient(AbstractContextManager["ReadOnlyImapClient"]):
 
     def examine_folder(self, folder: str) -> int:
         encoded_folder = encode_imap_utf7(folder)
-        status, _ = self.raw.examine(encoded_folder)
+        # Security-sensitive: imaplib exposes EXAMINE via select(..., readonly=True).
+        # This sends the read-only EXAMINE command, not a mutating SELECT.
+        status, _ = self.raw.select(_quote_mailbox(encoded_folder), readonly=True)
         self._ensure_ok(status, "EXAMINE")
         response = self.raw.response("UIDVALIDITY")
         values = response[1] if response else None
@@ -169,3 +174,8 @@ class ReadOnlyImapClient(AbstractContextManager["ReadOnlyImapClient"]):
             return datetime.strptime(value, "%d-%b-%Y %H:%M:%S %z").astimezone(UTC).isoformat()
         except ValueError:
             return None
+
+
+def _quote_mailbox(folder: str) -> str:
+    escaped = folder.replace("\\", "\\\\").replace('"', r"\"")
+    return f'"{escaped}"'

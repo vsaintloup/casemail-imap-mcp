@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import logging
@@ -47,15 +48,19 @@ class SyncService:
         self.store = store or PlainSyncStore(settings)
         self.access = FolderAccessController(settings)
 
-    def sync_selected_folders(self) -> dict[str, object]:
+    def sync_selected_folders(self, since_months: int | None = None) -> dict[str, object]:
+        since = _months_ago_utc(since_months) if since_months is not None else None
         selected_folders = self.store.list_selected_folders()
         status: dict[str, object] = {
             "state": "running",
             "started_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
             "selected_folders": selected_folders,
+            "since_months": since_months,
+            "since_iso": since.isoformat() if since else None,
             "folders": [],
             "errors": [],
+            "current": None,
         }
         self.store.set_sync_status(status)
 
@@ -69,8 +74,29 @@ class SyncService:
         errors: list[str] = []
 
         with ReadOnlyImapClient(self.settings) as client:
-            for folder in selected_folders:
-                result = self._sync_folder(client, folder, total_bytes)
+            for folder_index, folder in enumerate(selected_folders, start=1):
+                try:
+                    result = self._sync_folder(
+                        client,
+                        folder,
+                        total_bytes,
+                        since=since,
+                        status=status,
+                        folder_index=folder_index,
+                        total_folders=len(selected_folders),
+                        folder_results=folder_results,
+                        errors=errors,
+                    )
+                except Exception as exc:
+                    # Security-sensitive: isolate folder failures so one bad or
+                    # non-selectable folder cannot derail other scoped syncs.
+                    logger.warning("Folder sync failed for folder=%s: %s", folder, str(exc))
+                    result = SyncFolderResult(
+                        folder=folder,
+                        uidvalidity=0,
+                        remote_message_count=0,
+                        errors=[str(exc)],
+                    )
                 total_bytes += result.bytes_downloaded
                 folder_results.append(result.as_dict())
                 if result.errors:
@@ -81,6 +107,16 @@ class SyncService:
                         "folders": folder_results,
                         "errors": errors,
                         "bytes_downloaded": total_bytes,
+                        "current": {
+                            "folder": folder,
+                            "folder_index": folder_index,
+                            "total_folders": len(selected_folders),
+                            "state": "done_with_errors" if result.errors else "done",
+                            "messages_processed": result.messages_downloaded + result.messages_skipped,
+                            "messages_to_download": result.messages_downloaded,
+                            "remote_message_count": result.remote_message_count,
+                            "progress_percent": 100,
+                        },
                     }
                 )
                 self.store.set_sync_status(status)
@@ -96,13 +132,26 @@ class SyncService:
                 "folders": folder_results,
                 "errors": errors,
                 "bytes_downloaded": total_bytes,
+                "current": None,
             }
         )
         self.store.set_sync_status(status)
         return status
 
-    def _sync_folder(self, client: ReadOnlyImapClient, folder: str, starting_bytes: int) -> SyncFolderResult:
-        uidvalidity, remote_uids = client.search_uids(folder)
+    def _sync_folder(
+        self,
+        client: ReadOnlyImapClient,
+        folder: str,
+        starting_bytes: int,
+        *,
+        since: datetime | None,
+        status: dict[str, object],
+        folder_index: int,
+        total_folders: int,
+        folder_results: list[dict[str, object]],
+        errors: list[str],
+    ) -> SyncFolderResult:
+        uidvalidity, remote_uids = client.search_uids(folder, since=since)
         self.store.mark_folder_stale(folder, uidvalidity)
         missing = self.store.missing_uids(folder, uidvalidity, remote_uids)
         result = SyncFolderResult(
@@ -112,8 +161,19 @@ class SyncService:
             messages_skipped=len(remote_uids) - len(missing),
             errors=[],
         )
+        self._publish_folder_progress(
+            status,
+            result,
+            folder_index=folder_index,
+            total_folders=total_folders,
+            starting_bytes=starting_bytes,
+            messages_to_download=len(missing),
+            messages_processed=0,
+            folder_results=folder_results,
+            errors=errors,
+        )
 
-        for uid in missing:
+        for index, uid in enumerate(missing, start=1):
             if starting_bytes + result.bytes_downloaded >= self.settings.max_total_sync_bytes_per_run:
                 result.errors.append("Sync byte budget reached before all messages were downloaded.")
                 break
@@ -128,6 +188,17 @@ class SyncService:
             except Exception as exc:  # pragma: no cover - defensive per-message isolation
                 logger.warning("Message sync failed for folder=%s uid=%s: %s", folder, uid, str(exc))
                 result.errors.append(f"UID {uid}: {exc}")
+            self._publish_folder_progress(
+                status,
+                result,
+                folder_index=folder_index,
+                total_folders=total_folders,
+                starting_bytes=starting_bytes,
+                messages_to_download=len(missing),
+                messages_processed=index,
+                folder_results=folder_results,
+                errors=errors,
+            )
 
         self.store.update_folder_sync_result(
             folder,
@@ -139,6 +210,45 @@ class SyncService:
             error="; ".join(result.errors) if result.errors else None,
         )
         return result
+
+    def _publish_folder_progress(
+        self,
+        status: dict[str, object],
+        result: SyncFolderResult,
+        *,
+        folder_index: int,
+        total_folders: int,
+        starting_bytes: int,
+        messages_to_download: int,
+        messages_processed: int,
+        folder_results: list[dict[str, object]],
+        errors: list[str],
+    ) -> None:
+        progress_percent = 100 if messages_to_download == 0 else round((messages_processed / messages_to_download) * 100, 1)
+        status.update(
+            {
+                "updated_at": utc_now_iso(),
+                "folders": [*folder_results, result.as_dict()],
+                "errors": errors,
+                "bytes_downloaded": starting_bytes + result.bytes_downloaded,
+                "current": {
+                    "folder": result.folder,
+                    "folder_index": folder_index,
+                    "total_folders": total_folders,
+                    "uidvalidity": result.uidvalidity,
+                    "remote_message_count": result.remote_message_count,
+                    "messages_to_download": messages_to_download,
+                    "messages_processed": messages_processed,
+                    "messages_downloaded": result.messages_downloaded,
+                    "messages_skipped": result.messages_skipped,
+                    "attachments_downloaded": result.attachments_downloaded,
+                    "attachments_skipped": result.attachments_skipped,
+                    "bytes_downloaded": starting_bytes + result.bytes_downloaded,
+                    "progress_percent": progress_percent,
+                },
+            }
+        )
+        self.store.set_sync_status(status)
 
     def _build_cached_message(
         self,
@@ -242,3 +352,13 @@ class SyncService:
             return "sent"
         return "received"
 
+
+def _months_ago_utc(months: int) -> datetime:
+    if months <= 0:
+        raise ValueError("since_months must be a positive integer")
+    now = datetime.now(tz=UTC)
+    month_index = (now.year * 12 + now.month - 1) - months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    day = min(now.day, calendar.monthrange(year, month)[1])
+    return now.replace(year=year, month=month, day=day)

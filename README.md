@@ -136,6 +136,8 @@ The admin UI lets you:
 - load remote mailbox folders
 - select multiple folders for local sync
 - run `Sync messages and attachments`
+- optionally limit a sync to the last `N` months; leave the field blank to sync the whole selected folder
+- watch live progress while messages and attachments are being downloaded
 - inspect per-folder sync status
 
 The password field is write-only in the UI. Once saved, the API reports only whether a password is configured.
