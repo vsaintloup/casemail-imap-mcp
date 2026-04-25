@@ -1,5 +1,4 @@
 beautifulsoup4==4.14.2
-cryptography==46.0.3
 mcp==1.27.0
 openpyxl==3.1.5
 pillow==11.3.0

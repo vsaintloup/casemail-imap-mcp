@@ -9,8 +9,11 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from .admin import admin_routes
+from .cache import PlainSyncStore
 from .config import Settings
 from .logging_utils import configure_logging
+from .security import FolderAccessController
 from .service import CaseMailService
 
 
@@ -211,6 +214,12 @@ def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or Settings()
     mcp, service = create_mcp_server(settings)
 
+    def reload_settings(new_settings: Settings) -> None:
+        configure_logging(new_settings.log_level)
+        service.settings = new_settings
+        service.access = FolderAccessController(new_settings)
+        service.store = PlainSyncStore(new_settings)
+
     async def healthz(request) -> JSONResponse:  # noqa: ANN001
         return JSONResponse({"status": "ok"})
 
@@ -231,8 +240,8 @@ def create_app(settings: Settings | None = None) -> Starlette:
         routes=[
             Route("/healthz", healthz),
             Route("/readyz", readyz),
+            *admin_routes(settings, reload_settings),
             Mount("/mcp", app=mcp.streamable_http_app()),
         ],
         lifespan=lifespan,
     )
-

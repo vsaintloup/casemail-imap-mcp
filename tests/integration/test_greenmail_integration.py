@@ -10,7 +10,9 @@ import pytest
 from testcontainers.core.container import DockerContainer
 
 from casemail_imap_mcp.config import Settings
+from casemail_imap_mcp.cache import PlainSyncStore
 from casemail_imap_mcp.service import CaseMailService
+from casemail_imap_mcp.sync_service import SyncService
 
 
 GREENMAIL_IMAGE = "greenmail/standalone:2.1.2"
@@ -158,10 +160,14 @@ def test_greenmail_integration_case_and_sent_lookup(tmp_path) -> None:
             cache_db_path=tmp_path / "cache.sqlite3",
             cache_key_path=tmp_path / "cache.key",
         )
-        service = CaseMailService(settings)
+        store = PlainSyncStore(settings)
+        store.set_selected_folders(["Client/ABC v DEF", "Sent"])
+        sync_result = SyncService(settings, store).sync_selected_folders()
+        service = CaseMailService(settings, store)
 
         folders = service.list_folders(include_counts=True)
         assert any(folder["name"] == "Client/ABC v DEF" for folder in folders["folders"])
+        assert sync_result["state"] == "completed"
 
         search = service.search_messages(
             case_folder="Client/ABC v DEF",
@@ -177,6 +183,9 @@ def test_greenmail_integration_case_and_sent_lookup(tmp_path) -> None:
         detail = service.read_message(message_ref=sent_message["message_ref"], extract_attachment_text="supported")
         assert detail["message"]["attachments"][0]["filename"] == "draft.txt"
         assert detail["message"]["parsing_warnings"]
+        attachment = service.read_attachment(sent_message["message_ref"], "2")
+        assert attachment["attachment"]["raw_bytes_cached"] is True
+        assert "draft text" in attachment["attachment"]["extracted_text"]
 
         thread = service.get_thread(
             case_folder="Client/ABC v DEF",
@@ -189,3 +198,25 @@ def test_greenmail_integration_case_and_sent_lookup(tmp_path) -> None:
 
         timeline = service.case_timeline(case_folder="Client/ABC v DEF", include_sent=True, sent_folders=["Sent"], limit=10)
         assert any("draft.txt" in entry["attachment_names"] for entry in timeline["timeline"])
+
+        mailbox = imaplib.IMAP4(host, port)
+        mailbox.login("lawyer@example.com", "secret")
+        mailbox.append(
+            "Client/ABC v DEF",
+            None,
+            None,
+            _build_message(
+                "New synced message",
+                "client@example.com",
+                "lawyer@example.com",
+                "This arrives after the first sync.",
+                message_id="<new-after-sync@example.test>",
+                attachment_name="new.txt",
+                attachment_bytes=b"new attachment",
+            ),
+        )
+        mailbox.logout()
+
+        second_sync = SyncService(settings, store).sync_selected_folders()
+        assert second_sync["state"] == "completed"
+        assert any(folder["messages_downloaded"] == 1 for folder in second_sync["folders"])

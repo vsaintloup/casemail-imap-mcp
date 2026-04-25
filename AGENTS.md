@@ -12,7 +12,8 @@ Principes du projet :
 Contraintes d'implementation :
 - conserver les outils MCP sous le namespace `case_mail.*` uniquement ;
 - toute lecture de contenu doit passer par un `case_folder` valide ou un `message_ref` signe ;
-- ne jamais stocker de message RFC822 brut ni de binaire de piece jointe ;
+- ne jamais stocker de message RFC822 brut ;
+- les binaires de pieces jointes peuvent etre caches localement en SQLite seulement par la synchronisation explicite de dossiers selectionnes ;
 - limiter et journaliser prudemment, sans corps complets, secrets, mots de passe ni tokens ;
 - commenter brievement les zones de logique sensibles a la securite.
 
@@ -21,4 +22,3 @@ Tests et verification :
 - garder les tests unitaires rapides et deterministes ;
 - marquer clairement les tests Docker/GreenMail comme integrationnels ;
 - si une verification ne peut pas etre executee localement, le dire explicitement dans le resume final.
-

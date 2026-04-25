@@ -20,15 +20,15 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    imap_host: str = Field(alias="IMAP_HOST")
+    imap_host: str = Field(default="", alias="IMAP_HOST")
     imap_port: int = Field(default=993, alias="IMAP_PORT")
-    imap_username: str = Field(alias="IMAP_USERNAME")
-    imap_password: str = Field(alias="IMAP_PASSWORD")
+    imap_username: str = Field(default="", alias="IMAP_USERNAME")
+    imap_password: str = Field(default="", alias="IMAP_PASSWORD")
     imap_use_ssl: bool = Field(default=True, alias="IMAP_USE_SSL")
     imap_timeout_seconds: int = Field(default=30, alias="IMAP_TIMEOUT_SECONDS")
     imap_retry_count: int = Field(default=1, alias="IMAP_RETRY_COUNT")
 
-    case_folder_allowlist_regex: str = Field(alias="CASE_FOLDER_ALLOWLIST_REGEX")
+    case_folder_allowlist_regex: str = Field(default=r".+", alias="CASE_FOLDER_ALLOWLIST_REGEX")
     sent_folder_allowlist_regex: str = Field(default=r"^(Sent|Sent Items)$", alias="SENT_FOLDER_ALLOWLIST_REGEX")
     default_sent_folders: str = Field(default="Sent,Sent Items", alias="DEFAULT_SENT_FOLDERS")
     allow_global_search: bool = Field(default=False, alias="ALLOW_GLOBAL_SEARCH")
@@ -41,8 +41,9 @@ class Settings(BaseSettings):
     max_attachment_extract_chars: int = Field(default=20000, alias="MAX_ATTACHMENT_EXTRACT_CHARS")
     max_body_chars: int = Field(default=50000, alias="MAX_BODY_CHARS")
     max_snippet_chars: int = Field(default=400, alias="MAX_SNIPPET_CHARS")
+    max_total_sync_bytes_per_run: int = Field(default=1073741824, alias="MAX_TOTAL_SYNC_BYTES_PER_RUN")
 
-    message_ref_secret: str = Field(alias="MESSAGE_REF_SECRET")
+    message_ref_secret: str = Field(default="local-dev-message-ref-secret", alias="MESSAGE_REF_SECRET")
     cache_enabled: bool = Field(default=True, alias="CACHE_ENABLED")
     cache_db_path: Path = Field(default=Path(".cache/casemail_cache.sqlite3"), alias="CACHE_DB_PATH")
     cache_key_path: Path = Field(default=Path(".cache/casemail_cache.key"), alias="CACHE_KEY_PATH")
@@ -61,6 +62,7 @@ class Settings(BaseSettings):
         "max_attachment_extract_chars",
         "max_body_chars",
         "max_snippet_chars",
+        "max_total_sync_bytes_per_run",
     )
     @classmethod
     def _must_be_positive(cls, value: int) -> int:
@@ -93,4 +95,3 @@ class Settings(BaseSettings):
 
     def ensure_cache_parent_dirs(self) -> None:
         self.cache_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_key_path.parent.mkdir(parents=True, exist_ok=True)
