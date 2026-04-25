@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from .admin import admin_routes
+from .auth import AccessTokenMiddleware
 from .cache import PlainSyncStore
 from .config import Settings
 from .logging_utils import configure_logging
@@ -68,6 +69,7 @@ def create_mcp_server(settings: Settings | None = None) -> tuple[FastMCP, CaseMa
         include_sent: bool = False,
         sent_folders: list[str] | None = None,
         query: str | None = None,
+        search_term: str | None = None,
         correspondents: list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
@@ -79,7 +81,7 @@ def create_mcp_server(settings: Settings | None = None) -> tuple[FastMCP, CaseMa
             case_folder=case_folder,
             include_sent=include_sent,
             sent_folders=sent_folders,
-            query=query,
+            query=query or search_term,
             correspondents=correspondents,
             since=since,
             until=until,
@@ -213,8 +215,11 @@ def create_mcp_server(settings: Settings | None = None) -> tuple[FastMCP, CaseMa
 def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or Settings()
     mcp, service = create_mcp_server(settings)
+    current_settings = settings
 
     def reload_settings(new_settings: Settings) -> None:
+        nonlocal current_settings
+        current_settings = new_settings
         configure_logging(new_settings.log_level)
         service.settings = new_settings
         service.access = FolderAccessController(new_settings)
@@ -236,7 +241,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         async with mcp.session_manager.run():
             yield
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/healthz", healthz),
             Route("/readyz", readyz),
@@ -245,3 +250,5 @@ def create_app(settings: Settings | None = None) -> Starlette:
         ],
         lifespan=lifespan,
     )
+    app.add_middleware(AccessTokenMiddleware, settings_provider=lambda: current_settings)
+    return app

@@ -42,22 +42,33 @@ class ReadOnlyImapClient(AbstractContextManager["ReadOnlyImapClient"]):
         self._imap: imaplib.IMAP4 | imaplib.IMAP4_SSL | None = None
 
     def __enter__(self) -> "ReadOnlyImapClient":
+        self._connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._disconnect()
+        return None
+
+    def _connect(self) -> None:
         socket.setdefaulttimeout(self._settings.imap_timeout_seconds)
         if self._settings.imap_use_ssl:
             self._imap = imaplib.IMAP4_SSL(self._settings.imap_host, self._settings.imap_port)
         else:
             self._imap = imaplib.IMAP4(self._settings.imap_host, self._settings.imap_port)
         self._imap.login(self._settings.imap_username, self._settings.imap_password)
-        return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def _disconnect(self) -> None:
         if self._imap is not None:
             try:
                 self._imap.logout()
             except Exception:  # pragma: no cover - best-effort cleanup
                 logger.debug("IMAP logout failed during cleanup.")
         self._imap = None
-        return None
+
+    def reconnect_folder(self, folder: str) -> int:
+        self._disconnect()
+        self._connect()
+        return self.examine_folder(folder)
 
     @property
     def raw(self) -> imaplib.IMAP4 | imaplib.IMAP4_SSL:
@@ -121,8 +132,15 @@ class ReadOnlyImapClient(AbstractContextManager["ReadOnlyImapClient"]):
         uids = [int(item) for item in raw_uids.decode("ascii", "ignore").split() if item]
         return uidvalidity, uids
 
-    def fetch_message(self, folder: str, uid: int, uidvalidity: int | None = None) -> ImapFetchedMessage:
-        current_uidvalidity = self.examine_folder(folder)
+    def fetch_message(
+        self,
+        folder: str,
+        uid: int,
+        uidvalidity: int | None = None,
+        *,
+        assume_folder_selected: bool = False,
+    ) -> ImapFetchedMessage:
+        current_uidvalidity = uidvalidity if assume_folder_selected and uidvalidity is not None else self.examine_folder(folder)
         if uidvalidity is not None and uidvalidity != current_uidvalidity:
             raise ImapError("UIDVALIDITY mismatch for requested message")
         # Security-sensitive: BODY.PEEK keeps reads side-effect free and avoids setting \Seen.

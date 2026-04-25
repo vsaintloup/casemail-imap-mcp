@@ -3,12 +3,15 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import imaplib
 import logging
+import socket
+import ssl
 
 from .attachments import extract_text
 from .cache import PlainSyncStore, utc_now_iso
 from .config import Settings
-from .imap_client import ImapFetchedMessage, ReadOnlyImapClient
+from .imap_client import ImapError, ImapFetchedMessage, ReadOnlyImapClient
 from .models import Attachment, Direction, MessageDetail, MessageRefPayload
 from .parsing import iter_attachment_parts, parse_email_message, parse_message_bytes
 from .security import FolderAccessController, build_message_ref
@@ -178,7 +181,7 @@ class SyncService:
                 result.errors.append("Sync byte budget reached before all messages were downloaded.")
                 break
             try:
-                fetched = client.fetch_message(folder, uid, uidvalidity)
+                fetched = self._fetch_message_with_reconnect(client, folder, uid, uidvalidity)
                 detail, attachment_rows, downloaded_bytes = self._build_cached_message(folder, fetched)
                 self.store.save_message(detail, attachment_rows)
                 result.messages_downloaded += 1
@@ -210,6 +213,31 @@ class SyncService:
             error="; ".join(result.errors) if result.errors else None,
         )
         return result
+
+    def _fetch_message_with_reconnect(
+        self,
+        client: ReadOnlyImapClient,
+        folder: str,
+        uid: int,
+        uidvalidity: int,
+    ) -> ImapFetchedMessage:
+        attempts = max(1, self.settings.imap_retry_count + 1)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                # Security-sensitive: the folder has already been opened with
+                # EXAMINE, so fetches stay read-only and avoid per-message
+                # mailbox re-selection.
+                return client.fetch_message(folder, uid, uidvalidity, assume_folder_selected=True)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts or not _is_transient_imap_error(exc):
+                    raise
+                logger.warning("IMAP connection interrupted for folder=%s uid=%s; reconnecting.", folder, uid)
+                reconnected_uidvalidity = client.reconnect_folder(folder)
+                if reconnected_uidvalidity != uidvalidity:
+                    raise ImapError("UIDVALIDITY mismatch after reconnect during sync") from exc
+        raise last_error or ImapError("IMAP fetch failed")
 
     def _publish_folder_progress(
         self,
@@ -362,3 +390,21 @@ def _months_ago_utc(months: int) -> datetime:
     month = month_index % 12 + 1
     day = min(now.day, calendar.monthrange(year, month)[1])
     return now.replace(year=year, month=month, day=day)
+
+
+def _is_transient_imap_error(exc: Exception) -> bool:
+    if isinstance(exc, (imaplib.IMAP4.abort, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError)):
+        return True
+    message = str(exc).lower()
+    transient_fragments = [
+        "eof",
+        "socket error",
+        "connection reset",
+        "connection closed",
+        "timed out",
+        "timeout",
+        "ssl",
+        "unexpected eof",
+        "broken pipe",
+    ]
+    return any(fragment in message for fragment in transient_fragments)

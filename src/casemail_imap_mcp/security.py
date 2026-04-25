@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import re
+import unicodedata
 from typing import Iterable
 
 from .config import Settings
@@ -49,13 +50,29 @@ class FolderAccessController:
     def resolve_sent_folders(self, requested: list[str] | None, accessible_folders: Iterable[str]) -> list[str]:
         accessible = [folder for folder in accessible_folders if self.is_sent_folder_allowed(folder)]
         if requested:
-            resolved = [folder for folder in requested if folder in accessible]
+            resolved = []
+            for folder in requested:
+                match = resolve_folder_name(folder, accessible)
+                if match:
+                    resolved.append(match)
         else:
-            defaults = {folder.lower() for folder in self._settings.default_sent_folder_list}
-            resolved = [folder for folder in accessible if folder.lower() in defaults]
+            defaults = {_folder_key(folder) for folder in self._settings.default_sent_folder_list}
+            resolved = [folder for folder in accessible if _folder_key(folder) in defaults]
             if not resolved:
                 resolved = accessible
         return sorted(dict.fromkeys(resolved))
+
+
+def resolve_folder_name(requested: str, accessible_folders: Iterable[str]) -> str | None:
+    requested_key = _folder_key(requested)
+    for folder in accessible_folders:
+        if _folder_key(folder) == requested_key:
+            return folder
+    return None
+
+
+def _folder_key(folder: str) -> str:
+    return unicodedata.normalize("NFC", folder).casefold()
 
 
 def _b64_encode(data: bytes) -> str:

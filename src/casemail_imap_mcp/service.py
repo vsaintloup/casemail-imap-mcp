@@ -16,6 +16,7 @@ from .models import (
     TimelineEntry,
 )
 from .security import FolderAccessController, parse_message_ref
+from .security import resolve_folder_name
 from .threading_utils import build_thread, candidate_from_summary, classify_linkage
 
 logger = logging.getLogger(__name__)
@@ -283,9 +284,10 @@ class CaseMailService:
 
     def _ensure_synced_case_folder(self, folder: str) -> str:
         self.access.ensure_case_folder(folder)
-        if folder not in self.store.list_selected_folders():
+        resolved = resolve_folder_name(folder, self.store.list_selected_folders())
+        if resolved is None:
             raise NotSyncedError("case_folder is not selected for local sync")
-        return folder
+        return resolved
 
     def _filter_summaries(
         self,
@@ -324,7 +326,27 @@ class CaseMailService:
             return False
         if query:
             q = query.lower()
-            haystacks = [summary.subject.lower(), summary.normalized_subject.lower(), summary.snippet.lower()]
+            q = q.strip().strip('"')
+            if ":" in q:
+                q = q.split(":", 1)[1].strip().strip('"')
+            haystacks = [
+                summary.subject.lower(),
+                summary.normalized_subject.lower(),
+                summary.snippet.lower(),
+                " ".join(
+                    filter(
+                        None,
+                        [
+                            summary.from_.name.lower() if summary.from_.name else None,
+                            summary.from_.email,
+                            summary.from_.raw.lower(),
+                            *(participant.name.lower() for participant in [*summary.to, *summary.cc, *summary.reply_to] if participant.name),
+                            *(participant.email for participant in [*summary.to, *summary.cc, *summary.reply_to] if participant.email),
+                            *(participant.raw.lower() for participant in [*summary.to, *summary.cc, *summary.reply_to]),
+                        ],
+                    )
+                ),
+            ]
             if not any(q in haystack for haystack in haystacks):
                 return False
         if correspondents:
@@ -378,4 +400,3 @@ def _coerce_end_datetime(value: str | None) -> datetime | None:
         return _coerce_any_datetime(value)
     parsed = date.fromisoformat(value) + timedelta(days=1)
     return datetime.combine(parsed, time.min, tzinfo=UTC)
-

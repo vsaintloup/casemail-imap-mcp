@@ -5,7 +5,7 @@ CaseMail IMAP is a local-only, read-only remote MCP server for ChatGPT. It is bu
 Version 1 is intentionally local and conservative:
 
 - tool-only MCP endpoint plus a local admin UI at `/admin`
-- no authentication in v1
+- optional bearer-token protection for `/admin`, `/admin/api`, `/readyz`, and `/mcp`
 - strict exposure through folders selected in the local sync UI
 - no mailbox mutation
 - no raw RFC822 persistence
@@ -53,6 +53,9 @@ Copy `.env.example` to `.env` and fill in your values, or use `/admin` to write 
 | `APP_HOST` | no | Host bind for the local ASGI server |
 | `APP_PORT` | no | Port bind for the local ASGI server |
 | `LOG_LEVEL` | no | Logging level, default `INFO` |
+| `CASEMAIL_ACCESS_TOKEN` | strongly recommended for tunnels | Bearer/API token required by protected routes when set |
+| `CASEMAIL_AUTH_REQUIRED` | no | If `true`, fail closed when no access token is configured |
+| `CASEMAIL_AUTH_COOKIE_MAX_AGE_SECONDS` | no | Admin cookie lifetime after token login |
 | `IMAP_HOST` | yes | IMAP server hostname |
 | `IMAP_PORT` | yes | IMAP server port |
 | `IMAP_USERNAME` | yes | IMAP username, typically your mailbox |
@@ -142,21 +145,56 @@ The admin UI lets you:
 
 The password field is write-only in the UI. Once saved, the API reports only whether a password is configured.
 
+## Access token protection
+
+Before exposing the server through a public HTTPS tunnel, configure a local access token in `.env`:
+
+```powershell
+$token = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_')
+Add-Content .env "CASEMAIL_ACCESS_TOKEN=$token"
+Add-Content .env "CASEMAIL_AUTH_REQUIRED=true"
+```
+
+Restart the server after changing `.env`.
+
+Preferred authentication is an HTTP header:
+
+```text
+Authorization: Bearer YOUR_TOKEN
+```
+
+For the local admin UI, you can also open:
+
+```text
+http://127.0.0.1:8000/admin?access_token=YOUR_TOKEN
+```
+
+That sets a local `HttpOnly` cookie so subsequent `/admin/api` calls do not keep the token in every URL.
+
+If ChatGPT Developer Mode does not offer a custom bearer-token field, use the tunnel URL with the token query parameter as a fallback:
+
+```text
+https://your-tunnel.example/mcp?access_token=YOUR_TOKEN
+```
+
+This is less ideal than a bearer header because URLs can appear in tooling history. Keep the tunnel temporary and stop it when you are done.
+
 ## Local-only production-like deployment
 
-Version 1 does not implement OAuth or ChatGPT app authentication and should not be exposed permanently to the public internet.
+Version 1 does not implement OAuth and should not be exposed permanently to the public internet. Use `CASEMAIL_ACCESS_TOKEN` whenever a tunnel is active.
 
 If you need to connect it to ChatGPT Developer Mode:
 
 1. Run the server locally.
 2. Expose it temporarily over HTTPS with a tunnel.
-3. Create the connector in ChatGPT using the tunnel URL.
+3. Create the connector in ChatGPT using the tunnel URL plus `/mcp`.
 4. Stop the tunnel when you are done.
 
 Recommended posture:
 
 - only run on a trusted machine
 - keep selected folders narrow
+- configure `CASEMAIL_ACCESS_TOKEN` before starting a tunnel
 - use ephemeral tunnel URLs
 - do not leave the server exposed unattended
 

@@ -147,6 +147,46 @@ def admin_routes(settings: Settings, reload_settings: SettingsReloader) -> list[
         current = Settings()
         return JSONResponse(PlainSyncStore(current).get_sync_status())
 
+    async def diagnostic_search(request: Request) -> JSONResponse:
+        current = Settings()
+        store = PlainSyncStore(current)
+        from .service import CaseMailService
+
+        params = request.query_params
+        service = CaseMailService(current, store)
+        case_folder = params.get("case_folder", "")
+        query = params.get("query") or params.get("search") or params.get("q")
+        sent_folder = params.get("sent_folder")
+        sent_folders = [sent_folder] if sent_folder else None
+        try:
+            result = service.search_messages(
+                case_folder=case_folder,
+                include_sent=params.get("include_sent", "true").lower() != "false",
+                sent_folders=sent_folders,
+                query=query,
+                limit=int(params.get("limit", "10")),
+            )
+            return JSONResponse(
+                {
+                    "selected_folders": store.list_selected_folders(),
+                    "case_folder": result["case_folder"],
+                    "sent_folders": result["sent_folders"],
+                    "query": query,
+                    "result_count": len(result["messages"]),
+                    "source": result["source"],
+                }
+            )
+        except Exception as exc:
+            return JSONResponse(
+                {
+                    "selected_folders": store.list_selected_folders(),
+                    "query": query,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                status_code=400,
+            )
+
     return [
         Route("/admin", admin_page, methods=["GET"]),
         Route("/admin/api/config", get_config, methods=["GET"]),
@@ -156,6 +196,7 @@ def admin_routes(settings: Settings, reload_settings: SettingsReloader) -> list[
         Route("/admin/api/selected-folders", save_selected_folders, methods=["POST"]),
         Route("/admin/api/sync", sync_selected, methods=["POST"]),
         Route("/admin/api/sync-status", sync_status, methods=["GET"]),
+        Route("/admin/api/diagnostic-search", diagnostic_search, methods=["GET"]),
     ]
 
 

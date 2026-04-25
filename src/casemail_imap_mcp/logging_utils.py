@@ -7,7 +7,8 @@ import re
 _SENSITIVE_PATTERNS = [
     re.compile(r"(IMAP_PASSWORD=)([^\\s]+)", re.IGNORECASE),
     re.compile(r"(Authorization:\\s*Bearer\\s+)([^\\s]+)", re.IGNORECASE),
-    re.compile(r"(token=)([^&\\s]+)", re.IGNORECASE),
+    re.compile(r"((?:access_token|token)=)([^&\\s]+)", re.IGNORECASE),
+    re.compile(r"(CASEMAIL_ACCESS_TOKEN=)([^\\s]+)", re.IGNORECASE),
 ]
 
 
@@ -41,4 +42,3 @@ def configure_logging(level: str) -> None:
     has_filter = any(isinstance(item, RedactingFilter) for item in root.filters)
     if not has_filter:
         root.addFilter(RedactingFilter())
-

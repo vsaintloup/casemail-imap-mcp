@@ -107,6 +107,22 @@ def test_cache_only_service_fails_closed_for_unsynced_message(settings) -> None:
         service.read_message(message_ref)
 
 
+def test_search_matches_participant_names_and_from_syntax(settings) -> None:
+    store = PlainSyncStore(settings)
+    detail = _detail(settings)
+    detail.from_.name = "Michael Armstrong"
+    detail.from_.raw = "Michael Armstrong <client@example.com>"
+    store.set_selected_folders(["Client/ABC"])
+    store.save_message(detail, [])
+    service = CaseMailService(settings, store)
+
+    plain = service.search_messages(case_folder="Client/ABC", query="Michael Armstrong")
+    from_syntax = service.search_messages(case_folder="Client/ABC", query='from:"Michael Armstrong"')
+
+    assert len(plain["messages"]) == 1
+    assert len(from_syntax["messages"]) == 1
+
+
 class FakeSyncClient:
     calls: list[tuple[str, tuple]] = []
 
@@ -123,8 +139,8 @@ class FakeSyncClient:
         self.calls.append(("search_uids", (folder, since)))
         return 777, [1, 2]
 
-    def fetch_message(self, folder: str, uid: int, uidvalidity: int):
-        self.calls.append(("fetch_message", (folder, uid, uidvalidity)))
+    def fetch_message(self, folder: str, uid: int, uidvalidity: int, *, assume_folder_selected: bool = False):
+        self.calls.append(("fetch_message", (folder, uid, uidvalidity, assume_folder_selected)))
         return ImapFetchedMessage(
             uid=uid,
             uidvalidity=uidvalidity,
@@ -158,6 +174,7 @@ def test_sync_downloads_only_missing_messages_and_attachments(monkeypatch, setti
     assert first["state"] == "completed"
     assert second["state"] == "completed"
     assert len(fetch_calls) == 2
+    assert all(call[1][3] is True for call in fetch_calls)
     assert len(store.list_message_summaries(["Client/ABC"])) == 2
     attachment = store.get_attachment("Client/ABC", 777, 1, "2")
     assert attachment["raw_bytes_cached"] is True
@@ -206,3 +223,43 @@ def test_sync_month_limit_passes_since_to_imap(monkeypatch, settings) -> None:
     assert result["since_months"] == 6
     assert search_calls[0][1][1] is not None
     assert search_calls[0][1][1].tzinfo is not None
+
+
+class FlakySyncClient(FakeSyncClient):
+    reconnects = 0
+    failed_once = False
+
+    def __enter__(self):
+        FlakySyncClient.reconnects = 0
+        FlakySyncClient.failed_once = False
+        return self
+
+    def fetch_message(self, folder: str, uid: int, uidvalidity: int, *, assume_folder_selected: bool = False):
+        self.calls.append(("fetch_message", (folder, uid, uidvalidity, assume_folder_selected)))
+        if uid == 1 and not FlakySyncClient.failed_once:
+            FlakySyncClient.failed_once = True
+            raise RuntimeError("socket error: EOF")
+        return ImapFetchedMessage(
+            uid=uid,
+            uidvalidity=uidvalidity,
+            internal_date_iso="2026-02-01T10:00:00+00:00",
+            raw_bytes=_message_bytes(uid),
+        )
+
+    def reconnect_folder(self, folder: str):
+        self.calls.append(("reconnect_folder", (folder,)))
+        FlakySyncClient.reconnects += 1
+        return 777
+
+
+def test_sync_reconnects_after_transient_imap_eof(monkeypatch, settings) -> None:
+    store = PlainSyncStore(settings)
+    store.set_selected_folders(["Client/ABC"])
+    FlakySyncClient.calls = []
+    monkeypatch.setattr("casemail_imap_mcp.sync_service.ReadOnlyImapClient", FlakySyncClient)
+
+    result = SyncService(settings, store).sync_selected_folders()
+
+    assert result["state"] == "completed"
+    assert FlakySyncClient.reconnects == 1
+    assert len(store.list_message_summaries(["Client/ABC"])) == 2

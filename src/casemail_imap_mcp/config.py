@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    casemail_access_token: str = Field(default="", alias="CASEMAIL_ACCESS_TOKEN")
+    casemail_auth_required: bool = Field(default=False, alias="CASEMAIL_AUTH_REQUIRED")
+    casemail_auth_cookie_max_age_seconds: int = Field(default=28800, alias="CASEMAIL_AUTH_COOKIE_MAX_AGE_SECONDS")
 
     imap_host: str = Field(default="", alias="IMAP_HOST")
     imap_port: int = Field(default=993, alias="IMAP_PORT")
@@ -54,6 +57,7 @@ class Settings(BaseSettings):
         "imap_port",
         "imap_timeout_seconds",
         "imap_retry_count",
+        "casemail_auth_cookie_max_age_seconds",
         "max_results",
         "max_return_bytes",
         "max_search_scan",
