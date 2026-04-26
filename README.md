@@ -150,7 +150,9 @@ The password field is write-only in the UI. Once saved, the API reports only whe
 Before exposing the server through a public HTTPS tunnel, configure a local access token in `.env`:
 
 ```powershell
-$token = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_')
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
 Add-Content .env "CASEMAIL_ACCESS_TOKEN=$token"
 Add-Content .env "CASEMAIL_AUTH_REQUIRED=true"
 ```
@@ -162,6 +164,8 @@ Preferred authentication is an HTTP header:
 ```text
 Authorization: Bearer YOUR_TOKEN
 ```
+
+The server also accepts `X-API-Key: YOUR_TOKEN` and `API-Key: YOUR_TOKEN` for clients that label token auth as API-key auth.
 
 For the local admin UI, you can also open:
 
@@ -177,7 +181,15 @@ If ChatGPT Developer Mode does not offer a custom bearer-token field, use the tu
 https://your-tunnel.example/mcp?access_token=YOUR_TOKEN
 ```
 
-This is less ideal than a bearer header because URLs can appear in tooling history. Keep the tunnel temporary and stop it when you are done.
+If that does not expose tools, use the path-token URL, which avoids query-string stripping and redirects:
+
+```text
+https://your-tunnel.example/casemail/YOUR_TOKEN/mcp/
+```
+
+If the client truncates or saves only the tokenized base URL, `https://your-tunnel.example/casemail/YOUR_TOKEN` also maps to the MCP endpoint.
+
+URL tokens are less ideal than a bearer header because URLs can appear in tooling history. Keep the tunnel temporary and stop it when you are done.
 
 ## Local-only production-like deployment
 
@@ -187,7 +199,7 @@ If you need to connect it to ChatGPT Developer Mode:
 
 1. Run the server locally.
 2. Expose it temporarily over HTTPS with a tunnel.
-3. Create the connector in ChatGPT using the tunnel URL plus `/mcp`.
+3. Create the connector in ChatGPT using the tunnel URL plus `/mcp/`.
 4. Stop the tunnel when you are done.
 
 Recommended posture:
@@ -206,7 +218,7 @@ Recommended posture:
 ngrok http 8000
 ```
 
-Use the HTTPS forwarding URL and append `/mcp`.
+Use the HTTPS forwarding URL and append `/mcp/`.
 
 ### Cloudflare Tunnel
 
@@ -214,7 +226,7 @@ Use the HTTPS forwarding URL and append `/mcp`.
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
-Use the generated HTTPS URL and append `/mcp`.
+Use the generated HTTPS URL and append `/mcp/`.
 
 ## Connect in ChatGPT Developer Mode
 
@@ -223,7 +235,7 @@ Use the generated HTTPS URL and append `/mcp`.
 3. Enter:
    - Name: `CaseMail IMAP`
    - Description: `Read-only synced IMAP cache for selected legal case folders, with attachment text extraction.`
-   - URL: `https://your-tunnel.example/mcp`
+   - URL: `https://your-tunnel.example/mcp/`
 4. Save the connector and confirm that the `case_mail.*` tools appear.
 
 ## Refresh metadata after tool changes
@@ -315,7 +327,7 @@ The cache is plain SQLite. This is intentional for local personal-computer use w
 
 ## Known limitations
 
-- No auth in v1, so this server is not suitable for permanent public exposure.
+- Token auth in v1 is a local/tunnel safeguard, not a replacement for full OAuth or a permanent public deployment.
 - ChatGPT sees only synced local cache data; run sync again after new email arrives.
 - OCR quality depends on local Tesseract availability and language data.
 - Thread reconstruction uses heuristics after header-based linkage and may return false positives on highly repetitive subjects.
