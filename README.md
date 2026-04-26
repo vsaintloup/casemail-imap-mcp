@@ -145,6 +145,29 @@ The admin UI lets you:
 
 The password field is write-only in the UI. Once saved, the API reports only whether a password is configured.
 
+## Windows one-click launcher
+
+For day-to-day use on Windows, double-click:
+
+```text
+Launch CaseMail.cmd
+```
+
+The launcher builds and runs `dist\CaseMailLauncher.exe` if needed. It will:
+
+- start the local MCP server if it is not already running
+- stop any old CaseMail `cloudflared` quick tunnel for `127.0.0.1:8000`
+- start a fresh Cloudflare quick tunnel
+- print the ChatGPT connector URL and API key from `.env`
+- copy the full connection block to the clipboard
+- save the same connection block to `.cache\chatgpt-connection.txt`
+
+If Cloudflare creates a quick-tunnel URL but DNS propagation is slow or broken, the launcher will show the URL with a warning instead of failing silently. In that case, wait a minute and try the URL in ChatGPT; if it still fails, run the launcher again to get a different quick-tunnel URL.
+
+Keep the launcher window open while using ChatGPT. Press Enter in that window when you want to stop the tunnel and any server process started by the launcher.
+
+The generated `.exe`, tunnel logs, and connection text file are local artifacts only; `dist\` and `.cache\` are ignored by Git.
+
 ## Access token protection
 
 Before exposing the server through a public HTTPS tunnel, configure a local access token in `.env`:
